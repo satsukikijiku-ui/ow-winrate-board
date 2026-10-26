@@ -1,0 +1,42 @@
+name: OW勝率データ更新
+
+on:
+  # 自動更新：毎週水曜 3:00（日本時間）＝ 火曜 18:00（UTC）
+  # ※GitHubの混雑状況により、数分〜数十分遅れることがあります
+  schedule:
+    - cron: "0 18 * * 2"
+  # 手動更新：Actions 画面の「Run workflow」ボタンから実行
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 公式ヒーロー統計から取得
+        run: node scripts/fetch.mjs
+
+      - name: 変更があればコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data/stats.json
+          if git diff --cached --quiet; then
+            echo "データに変更はありませんでした"
+          else
+            git commit -m "データ更新 $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')（${{ github.event_name == 'workflow_dispatch' && '手動' || '自動' }}）"
+            git push
+          fi

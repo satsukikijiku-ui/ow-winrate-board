@@ -13,6 +13,8 @@ const OUT = resolve(ROOT, "docs/data/stats.json");
 const BASE = "https://overwatch.blizzard.com/ja-jp/rates/";
 const urlFor = (map) => `${BASE}?input=PC&map=${encodeURIComponent(map)}&region=Asia&role=All&rq=1&tier=All`;
 const ROTATE_HOURS = 20;
+// データの取り方の目印（画面に表示される数値を使う版）。違う目印のデータは先週分に使わない
+const SOURCE = "cells-v1";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 // ---- HTML解析（ブラウザ検証でも同じ関数を使用） ----
@@ -74,6 +76,22 @@ export function parseRows(html) {
   }));
 }
 
+// 画面に表示される数値（<span id="〈ヒーローid〉-winrate-value">56.7%</span> など）を読む。
+// 公式の画面と一致するのはこちら。allrows の数値は画面と別物だったため、数値はこちらを使う
+export function parseCells(html) {
+  const out = new Map();
+  const re = /\bid="([a-z0-9_-]+)-(winrate|pickrate|banrate)-value"[^>]*>([\s\S]*?)</gi;
+  let t;
+  while ((t = re.exec(html))) {
+    const id = t[1].toLowerCase();
+    const num = decodeEntities(t[3]).replace(/[^\d.]/g, "");
+    const v = num === "" ? null : Number(num);
+    if (!out.has(id)) out.set(id, {});
+    out.get(id)[t[2].toLowerCase()] = v !== null && isFinite(v) ? v : null;
+  }
+  return out;
+}
+
 // ---- 取得 ----
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -92,76 +110,9 @@ async function get(url) {
   throw new Error(`${url} の取得に失敗：${last && last.message}`);
 }
 
-// ---- 診断（公式との数値ずれの原因調査用。データの更新には影響しない） ----
-// 同じページを「通常」「キャッシュ回避」の2通りで取得し、返ってきた情報と数値を比べてログに出す
-const DIAG = true;
-const DIAG_MAPS = ["numbani", "route-66", "busan"];
-const DIAG_HEROES = ["reinhardt", "echo", "vendetta", "kiriko", "winston"];
-const DIAG_HEADERS = ["date", "age", "cache-control", "expires", "last-modified", "etag", "x-cache", "x-cache-hits", "cf-cache-status", "x-served-by", "x-amz-cf-pop", "x-amz-cf-id", "via", "server", "vary", "x-akamai-transformed", "server-timing"];
-
-async function diagFetch(url, noCache) {
-  const headers = { "user-agent": UA, "accept-language": "ja,en;q=0.8", accept: "text/html" };
-  if (noCache) Object.assign(headers, { "cache-control": "no-cache", pragma: "no-cache" });
-  const res = await fetch(url, { headers, cache: "no-store" });
-  const html = await res.text();
-  return { res, html };
-}
-
-async function diagnose() {
-  const { createHash } = await import("node:crypto");
-  const jst = (d) => new Date(d).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-  console.log("==================== 診断ここから ====================");
-  console.log(`診断時刻（日本時間）：${jst(Date.now())}`);
-  console.log("※この直後に公式ページを開き、下の「数値」と見比べてください");
-  for (const map of DIAG_MAPS) {
-    const variants = [
-      ["A 通常", urlFor(map), false],
-      ["B キャッシュ回避", urlFor(map) + "&_cb=" + Date.now(), true],
-    ];
-    const hashes = [];
-    for (const [label, url, noCache] of variants) {
-      try {
-        const { res, html } = await diagFetch(url, noCache);
-        console.log(`--- ${map} / ${label}：HTTP ${res.status}（${html.length}文字）`);
-        const hs = DIAG_HEADERS.map((h) => [h, res.headers.get(h)]).filter(([, v]) => v);
-        hs.forEach(([h, v]) => console.log(`    [応答] ${h}: ${String(v).slice(0, 160)}`));
-        const date = res.headers.get("date"), lm = res.headers.get("last-modified"), age = res.headers.get("age");
-        if (date) console.log(`    [応答] date（日本時間）: ${jst(date)}`);
-        if (lm) console.log(`    [応答] last-modified（日本時間）: ${jst(lm)}`);
-        if (age) console.log(`    [応答] 保存されてからの秒数（age）: ${age}秒（約${Math.round(Number(age) / 60)}分）`);
-        let rows = [];
-        try { rows = parseRows(html); } catch (e) { console.log("    データ表なし：" + e.message); }
-        const m = html.match(/<blz-data-table\b[\s\S]*?\sallrows="([^"]*)"/);
-        hashes.push(m ? createHash("sha256").update(m[1]).digest("hex").slice(0, 12) : "なし");
-        console.log(`    rq=${selectedValue(html, "filter-rq-select")} region=${selectedValue(html, "filter-region-select")} input=${selectedValue(html, "filter-input-select")} tier=${selectedValue(html, "filter-tier-select")} map=${selectedValue(html, "filter-map-select")}`);
-        for (const id of DIAG_HEROES) {
-          const r = rows.find((x) => x.id === id);
-          if (r) console.log(`    数値 ${r.name}：勝率 ${r.win} ／ ピック率 ${r.pick} ／ BAN率 ${r.ban}`);
-        }
-        // ページ内の日時らしき文字列や、データ取得先らしきURLの手がかり
-        const stamps = [...new Set(html.match(/20\d\d-\d\d-\d\d[T ]\d\d:\d\d(:\d\d)?(\.\d+)?Z?/g) || [])].slice(0, 5);
-        if (stamps.length) console.log(`    ページ内の日時：${stamps.join(" , ")}`);
-        const tag = (html.match(/<blz-data-table\b[^>]*?(?=\sallrows=)/) || [""])[0].replace(/\s+/g, " ").slice(0, 300);
-        if (tag) console.log(`    表タグ：${tag}`);
-        const apis = [...new Set(html.match(/["'](https?:\/\/[^"']*(?:api|rates|data)[^"']*|\/[^"'\s]*(?:api|rates\/data)[^"'\s]*)["']/gi) || [])].slice(0, 8);
-        if (apis.length) console.log(`    取得先の候補：${apis.join(" , ")}`);
-      } catch (e) {
-        console.log(`--- ${map} / ${label}：取得失敗 ${e.message}`);
-        hashes.push("失敗");
-      }
-      await sleep(800);
-    }
-    console.log(`    → A と B のデータは${hashes[0] === hashes[1] ? "同じ" : "違う"}（${hashes.join(" / ")}）`);
-  }
-  console.log("==================== 診断ここまで ====================");
-}
-
 async function main() {
   const now = new Date();
   console.log("取得開始", now.toISOString());
-  if (DIAG) {
-    try { await diagnose(); } catch (e) { console.log("診断でエラー（更新は続行）：" + e.message); }
-  }
 
   const top = await get(urlFor("all-maps"));
   const maps = parseMaps(top);
@@ -169,17 +120,37 @@ async function main() {
 
   const heroes = {};
   const fetched = [];
+  let cmpTotal = 0, cmpDiff = 0, cmpMax = 0, cmpEx = "";
   for (const m of maps) {
     const html = await get(urlFor(m.id));
     const rq = selectedValue(html, "filter-rq-select");
     if (rq !== "1") throw new Error(`${m.label}：ライバル・プレイのデータではありません（rq=${rq}）`);
+    // 名前・ロールは allrows から、勝率・ピック率・BAN率は画面の表示から取る
     const rows = parseRows(html);
     if (rows.length < 30) throw new Error(`${m.label}：ヒーロー数が少なすぎます（${rows.length}）`);
-    rows.forEach((r) => { heroes[r.id] = [String(r.name), r.role]; });
-    fetched.push({ ...m, rows: rows.map((r) => [r.id, r.win, r.pick, r.ban]) });
-    console.log(`  ${m.mode} / ${m.label}：${rows.length}人`);
+    const cells = parseCells(html);
+    const merged = rows.map((r) => {
+      const c = cells.get(String(r.id).toLowerCase()) || {};
+      const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+      return { ...r, oldWin: r.win, win: num(c.winrate), pick: num(c.pickrate), ban: num(c.banrate) };
+    });
+    const withWin = merged.filter((r) => r.win !== null).length;
+    if (withWin < 30) throw new Error(`${m.label}：画面の勝率を読み取れたヒーローが少なすぎます（${withWin}/${rows.length}）`);
+    const missing = merged.filter((r) => r.win === null).map((r) => r.name);
+    // 参考：allrows の勝率と画面の勝率の差
+    merged.forEach((r) => {
+      if (r.win === null || typeof r.oldWin !== "number") return;
+      cmpTotal++;
+      const d = Math.abs(r.win - r.oldWin);
+      if (d > 0.05) cmpDiff++;
+      if (d > cmpMax) { cmpMax = d; cmpEx = `${m.label} ${r.name}：画面 ${r.win} ／ allrows ${r.oldWin}`; }
+    });
+    merged.forEach((r) => { heroes[r.id] = [String(r.name), r.role]; });
+    fetched.push({ ...m, rows: merged.map((r) => [r.id, r.win, r.pick, r.ban]) });
+    console.log(`  ${m.mode} / ${m.label}：${withWin}人${missing.length ? `（画面に数値なし：${missing.join("、")}）` : ""}`);
     await sleep(800);
   }
+  console.log(`参考：allrows と画面の勝率が違ったのは ${cmpDiff}/${cmpTotal} 件。最大の差 ${cmpMax.toFixed(1)}（${cmpEx}）`);
 
   // 検証
   const roles = new Set(Object.values(heroes).map((h) => h[1]));
@@ -192,11 +163,14 @@ async function main() {
   try { old = JSON.parse(await readFile(OUT, "utf8")); } catch { old = null; }
   const oldMaps = new Map(((old && old.maps) || []).map((m) => [m.id, m]));
   const oldAt = old && old.updatedAt ? new Date(old.updatedAt) : null;
-  const rotate = !!oldAt && !isNaN(oldAt) && now - oldAt >= ROTATE_HOURS * 3600 * 1000;
-  const prevUpdatedAt = rotate ? old.updatedAt : (old && old.prevUpdatedAt) || null;
+  // 以前の版（allrows の数値）で取ったデータは画面の数値と比べられないので、先週分には使わない
+  const sameSource = !!old && old.source === SOURCE;
+  const rotate = sameSource && !!oldAt && !isNaN(oldAt) && now - oldAt >= ROTATE_HOURS * 3600 * 1000;
+  const prevUpdatedAt = !sameSource ? null : rotate ? old.updatedAt : old.prevUpdatedAt || null;
+  if (old && !sameSource) console.log("取得方法が変わったため、先週分はいったん空にします（次回の更新から前週比を表示）");
 
   const outMaps = fetched.map((m) => {
-    const o = oldMaps.get(m.id);
+    const o = sameSource ? oldMaps.get(m.id) : null;
     let prevRows = [];
     if (o) {
       prevRows = rotate
@@ -209,6 +183,7 @@ async function main() {
   const data = {
     updatedAt: now.toISOString().replace(/\.\d{3}Z$/, "Z"),
     prevUpdatedAt,
+    source: SOURCE,
     conditions: "ライバル・プレイ／マウス＆キーボード／アジア／全ティア",
     heroes,
     maps: outMaps,
@@ -218,6 +193,8 @@ async function main() {
 
   const added = outMaps.filter((m) => !oldMaps.has(m.id)).map((m) => m.label);
   const removed = [...oldMaps.values()].filter((m) => !outMaps.some((x) => x.id === m.id)).map((m) => m.label);
+  const showNum = (id, hero) => { const mm = outMaps.find((x) => x.id === id); const r = mm && mm.rows.find((x) => x[0] === hero); return r ? `${r[1]}（ピック ${r[2]}／BAN ${r[3]}）` : "なし"; };
+  console.log(`確認用：NUMBANI ラインハルト ${showNum("numbani", "reinhardt")}、エコー ${showNum("numbani", "echo")}`);
   console.log(`完了：${outMaps.length}マップ・${Object.keys(heroes).length}人／先週分：${rotate ? "繰り上げ" : "引き継ぎ"}（${prevUpdatedAt || "なし"}）`);
   if (added.length) console.log("追加されたマップ：" + added.join(", "));
   if (removed.length) console.log("なくなったマップ：" + removed.join(", "));

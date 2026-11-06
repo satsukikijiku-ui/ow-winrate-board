@@ -13,8 +13,8 @@ const OUT = resolve(ROOT, "docs/data/stats.json");
 const BASE = "https://overwatch.blizzard.com/ja-jp/rates/";
 const urlFor = (map) => `${BASE}?input=PC&map=${encodeURIComponent(map)}&region=Asia&role=All&rq=1&tier=All`;
 const ROTATE_HOURS = 20;
-// データの取り方の目印（画面に表示される数値を使う版）。違う目印のデータは先週分に使わない
-const SOURCE = "cells-v1";
+// データの取り方の目印（日本から取得した、画面に表示される数値）。違う目印のデータは先週分に使わない
+const SOURCE = "cells-jp-v1";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 // ---- HTML解析（ブラウザ検証でも同じ関数を使用） ----
@@ -95,40 +95,46 @@ export function parseCells(html) {
 // ---- 取得 ----
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 公式サイトの配信の仕組みに残った古い保存版（キャッシュ）を避けるため、
-// URLに毎回違う目印（_cb）を付け、「保存版ではなく最新を」と要求して取得する
-const CACHE_HEADERS = ["date", "age", "cache-control", "last-modified", "x-cache", "cf-cache-status", "x-served-by", "x-amz-cf-pop", "via", "server"];
-let headerLogs = 0;
+// 取得経路：公式サイトはアクセス元の場所によって別のデータを返すため、
+// 東京で動く取得役（Vercel・hnd1）を経由して、日本からアクセスしたときと同じページを取る。
+// GitHub の Secrets に OW_PROXY_URL と OW_PROXY_KEY が登録されていれば取得役を使う。
+// 取得役が東京（hnd1）以外で動いていた場合や、取得に失敗した場合は、データを書き換えずに止まる。
+const PROXY_URL = (process.env.OW_PROXY_URL || "").trim().replace(/\/+$/, "");
+const PROXY_KEY = (process.env.OW_PROXY_KEY || "").trim();
+const PROXY_REGION = "hnd1";
+let routeLogged = false;
 
-async function get(url) {
+async function getPage(map) {
   let last;
   for (let i = 1; i <= 3; i++) {
     try {
-      const bust = (url.includes("?") ? "&" : "?") + "_cb=" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-      const res = await fetch(url + bust, {
-        cache: "no-store",
-        headers: { "user-agent": UA, "accept-language": "ja,en;q=0.8", accept: "text/html", "cache-control": "no-cache", pragma: "no-cache" },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (headerLogs < 2) {
-        headerLogs++;
-        const hs = CACHE_HEADERS.map((h) => [h, res.headers.get(h)]).filter(([, v]) => v);
-        console.log(`  [応答の情報] ${hs.map(([h, v]) => `${h}: ${String(v).slice(0, 80)}`).join(" ／ ") || "なし"}`);
+      let res;
+      if (PROXY_URL) {
+        res = await fetch(`${PROXY_URL}/api/fetch?map=${encodeURIComponent(map)}`, { cache: "no-store", headers: { "x-proxy-key": PROXY_KEY } });
+        const region = res.headers.get("x-proxy-region");
+        if (res.status === 403) throw new Error("取得役の合言葉が違います（OW_PROXY_KEY と Vercel の PROXY_KEY を確認）");
+        if (region !== PROXY_REGION) throw new Error(`取得役が東京以外で動いています（${region}）。Vercel の Function Region を Tokyo（hnd1）にしてください`);
+        if (!routeLogged) { routeLogged = true; console.log(`  取得経路：東京の取得役（${region}）経由`); }
+      } else {
+        res = await fetch(urlFor(map), { cache: "no-store", headers: { "user-agent": UA, "accept-language": "ja,en;q=0.8", accept: "text/html" } });
+        if (!routeLogged) { routeLogged = true; console.log("  取得経路：GitHub から直接（※日本の公式表示と数値がずれます。OW_PROXY_URL を設定してください）"); }
       }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.text();
     } catch (e) {
       last = e;
+      if (/合言葉|東京以外/.test(e.message)) break;
       await sleep(3000 * i);
     }
   }
-  throw new Error(`${url} の取得に失敗：${last && last.message}`);
+  throw new Error(`${map} の取得に失敗：${last && last.message}`);
 }
 
 async function main() {
   const now = new Date();
   console.log("取得開始", now.toISOString());
 
-  const top = await get(urlFor("all-maps"));
+  const top = await getPage("all-maps");
   const maps = parseMaps(top);
   if (maps.length < 10) throw new Error(`マップ数が少なすぎます（${maps.length}）`);
 
@@ -136,7 +142,7 @@ async function main() {
   const fetched = [];
   let cmpTotal = 0, cmpDiff = 0, cmpMax = 0, cmpEx = "";
   for (const m of maps) {
-    const html = await get(urlFor(m.id));
+    const html = await getPage(m.id);
     const rq = selectedValue(html, "filter-rq-select");
     if (rq !== "1") throw new Error(`${m.label}：ライバル・プレイのデータではありません（rq=${rq}）`);
     // 名前・ロールは allrows から、勝率・ピック率・BAN率は画面の表示から取る

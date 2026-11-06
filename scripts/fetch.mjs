@@ -92,9 +92,76 @@ async function get(url) {
   throw new Error(`${url} の取得に失敗：${last && last.message}`);
 }
 
+// ---- 診断（公式との数値ずれの原因調査用。データの更新には影響しない） ----
+// 同じページを「通常」「キャッシュ回避」の2通りで取得し、返ってきた情報と数値を比べてログに出す
+const DIAG = true;
+const DIAG_MAPS = ["numbani", "route-66", "busan"];
+const DIAG_HEROES = ["reinhardt", "echo", "vendetta", "kiriko", "winston"];
+const DIAG_HEADERS = ["date", "age", "cache-control", "expires", "last-modified", "etag", "x-cache", "x-cache-hits", "cf-cache-status", "x-served-by", "x-amz-cf-pop", "x-amz-cf-id", "via", "server", "vary", "x-akamai-transformed", "server-timing"];
+
+async function diagFetch(url, noCache) {
+  const headers = { "user-agent": UA, "accept-language": "ja,en;q=0.8", accept: "text/html" };
+  if (noCache) Object.assign(headers, { "cache-control": "no-cache", pragma: "no-cache" });
+  const res = await fetch(url, { headers, cache: "no-store" });
+  const html = await res.text();
+  return { res, html };
+}
+
+async function diagnose() {
+  const { createHash } = await import("node:crypto");
+  const jst = (d) => new Date(d).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+  console.log("==================== 診断ここから ====================");
+  console.log(`診断時刻（日本時間）：${jst(Date.now())}`);
+  console.log("※この直後に公式ページを開き、下の「数値」と見比べてください");
+  for (const map of DIAG_MAPS) {
+    const variants = [
+      ["A 通常", urlFor(map), false],
+      ["B キャッシュ回避", urlFor(map) + "&_cb=" + Date.now(), true],
+    ];
+    const hashes = [];
+    for (const [label, url, noCache] of variants) {
+      try {
+        const { res, html } = await diagFetch(url, noCache);
+        console.log(`--- ${map} / ${label}：HTTP ${res.status}（${html.length}文字）`);
+        const hs = DIAG_HEADERS.map((h) => [h, res.headers.get(h)]).filter(([, v]) => v);
+        hs.forEach(([h, v]) => console.log(`    [応答] ${h}: ${String(v).slice(0, 160)}`));
+        const date = res.headers.get("date"), lm = res.headers.get("last-modified"), age = res.headers.get("age");
+        if (date) console.log(`    [応答] date（日本時間）: ${jst(date)}`);
+        if (lm) console.log(`    [応答] last-modified（日本時間）: ${jst(lm)}`);
+        if (age) console.log(`    [応答] 保存されてからの秒数（age）: ${age}秒（約${Math.round(Number(age) / 60)}分）`);
+        let rows = [];
+        try { rows = parseRows(html); } catch (e) { console.log("    データ表なし：" + e.message); }
+        const m = html.match(/<blz-data-table\b[\s\S]*?\sallrows="([^"]*)"/);
+        hashes.push(m ? createHash("sha256").update(m[1]).digest("hex").slice(0, 12) : "なし");
+        console.log(`    rq=${selectedValue(html, "filter-rq-select")} region=${selectedValue(html, "filter-region-select")} input=${selectedValue(html, "filter-input-select")} tier=${selectedValue(html, "filter-tier-select")} map=${selectedValue(html, "filter-map-select")}`);
+        for (const id of DIAG_HEROES) {
+          const r = rows.find((x) => x.id === id);
+          if (r) console.log(`    数値 ${r.name}：勝率 ${r.win} ／ ピック率 ${r.pick} ／ BAN率 ${r.ban}`);
+        }
+        // ページ内の日時らしき文字列や、データ取得先らしきURLの手がかり
+        const stamps = [...new Set(html.match(/20\d\d-\d\d-\d\d[T ]\d\d:\d\d(:\d\d)?(\.\d+)?Z?/g) || [])].slice(0, 5);
+        if (stamps.length) console.log(`    ページ内の日時：${stamps.join(" , ")}`);
+        const tag = (html.match(/<blz-data-table\b[^>]*?(?=\sallrows=)/) || [""])[0].replace(/\s+/g, " ").slice(0, 300);
+        if (tag) console.log(`    表タグ：${tag}`);
+        const apis = [...new Set(html.match(/["'](https?:\/\/[^"']*(?:api|rates|data)[^"']*|\/[^"'\s]*(?:api|rates\/data)[^"'\s]*)["']/gi) || [])].slice(0, 8);
+        if (apis.length) console.log(`    取得先の候補：${apis.join(" , ")}`);
+      } catch (e) {
+        console.log(`--- ${map} / ${label}：取得失敗 ${e.message}`);
+        hashes.push("失敗");
+      }
+      await sleep(800);
+    }
+    console.log(`    → A と B のデータは${hashes[0] === hashes[1] ? "同じ" : "違う"}（${hashes.join(" / ")}）`);
+  }
+  console.log("==================== 診断ここまで ====================");
+}
+
 async function main() {
   const now = new Date();
   console.log("取得開始", now.toISOString());
+  if (DIAG) {
+    try { await diagnose(); } catch (e) { console.log("診断でエラー（更新は続行）：" + e.message); }
+  }
 
   const top = await get(urlFor("all-maps"));
   const maps = parseMaps(top);

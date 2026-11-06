@@ -1,0 +1,5 @@
+{
+  "name": "ow-fetch-proxy",
+  "private": true,
+  "description": "OW勝率ボードの取得役（Vercel・東京）"
+}

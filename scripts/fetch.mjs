@@ -95,12 +95,26 @@ export function parseCells(html) {
 // ---- 取得 ----
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 公式サイトの配信の仕組みに残った古い保存版（キャッシュ）を避けるため、
+// URLに毎回違う目印（_cb）を付け、「保存版ではなく最新を」と要求して取得する
+const CACHE_HEADERS = ["date", "age", "cache-control", "last-modified", "x-cache", "cf-cache-status", "x-served-by", "x-amz-cf-pop", "via", "server"];
+let headerLogs = 0;
+
 async function get(url) {
   let last;
   for (let i = 1; i <= 3; i++) {
     try {
-      const res = await fetch(url, { headers: { "user-agent": UA, "accept-language": "ja,en;q=0.8", accept: "text/html" } });
+      const bust = (url.includes("?") ? "&" : "?") + "_cb=" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const res = await fetch(url + bust, {
+        cache: "no-store",
+        headers: { "user-agent": UA, "accept-language": "ja,en;q=0.8", accept: "text/html", "cache-control": "no-cache", pragma: "no-cache" },
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (headerLogs < 2) {
+        headerLogs++;
+        const hs = CACHE_HEADERS.map((h) => [h, res.headers.get(h)]).filter(([, v]) => v);
+        console.log(`  [応答の情報] ${hs.map(([h, v]) => `${h}: ${String(v).slice(0, 80)}`).join(" ／ ") || "なし"}`);
+      }
       return await res.text();
     } catch (e) {
       last = e;

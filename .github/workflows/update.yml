@@ -28,6 +28,10 @@ jobs:
 
       - name: 公式ヒーロー統計から取得
         run: node scripts/fetch.mjs
+        env:
+          # 東京の取得役（Vercel）。Settings → Secrets and variables → Actions に登録する
+          OW_PROXY_URL: ${{ secrets.OW_PROXY_URL }}
+          OW_PROXY_KEY: ${{ secrets.OW_PROXY_KEY }}
 
       - name: 変更があればコミット
         run: |

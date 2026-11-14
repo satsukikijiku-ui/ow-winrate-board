@@ -1,5 +1,11 @@
 name: OW勝率データ更新
 
+# 勝率データの取得と、ボードの公開（GitHub Pages）をまとめて行う。
+# ・勝率データ（docs/data/stats.json）だけをリポジトリに保存する
+# ・ティア表のカード画像と共有用ページは、公開のたびに一時フォルダ（_site）に作って公開する。
+#   リポジトリにも履歴にも残らないので、公開されるのは常に最新の1世代だけ
+# ※ Settings → Pages の Source を「GitHub Actions」にしておくこと
+
 on:
   # 自動更新：毎週水曜 3:00（日本時間）＝ 火曜 18:00（UTC）
   # ※GitHubの混雑状況により、数分〜数十分遅れることがあります
@@ -7,9 +13,18 @@ on:
     - cron: "0 18 * * 2"
   # 手動更新：Actions 画面の「Run workflow」ボタンから実行
   workflow_dispatch:
+  # ボードやおすすめを手で編集したとき：データは取得せず、公開だけやり直す
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "scripts/render-tiers.mjs"
+      - ".github/workflows/update.yml"
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: update-data
@@ -18,7 +33,10 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +45,7 @@ jobs:
           node-version: "20"
 
       - name: 公式ヒーロー統計から取得
+        if: github.event_name != 'push'
         run: node scripts/fetch.mjs
         env:
           # 東京の取得役（Vercel）。Settings → Secrets and variables → Actions に登録する
@@ -34,6 +53,7 @@ jobs:
           OW_PROXY_KEY: ${{ secrets.OW_PROXY_KEY }}
 
       - name: 変更があればコミット
+        if: github.event_name != 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -44,3 +64,32 @@ jobs:
             git commit -m "データ更新 $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')（${{ github.event_name == 'workflow_dispatch' && '手動' || '自動' }}）"
             git push
           fi
+
+      - name: 公開用フォルダを準備
+        run: |
+          rm -rf _site
+          cp -r docs _site
+          rm -rf _site/tier _site/share
+
+      # ティア表のカード画像（_site/tier）と共有用ページ（_site/share）を全マップ分作る。
+      # 失敗しても公開は続ける（その場合ボードは「画像をコピーして貼り付け」方式になる）
+      - name: ティア表のカード画像を作成
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          SITE_DIR: _site
+        run: |
+          npm install --no-save --no-package-lock --no-audit --no-fund playwright@1.48.2
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y -qq fonts-noto-cjk > /dev/null
+          node scripts/render-tiers.mjs
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: GitHub Pages に公開
+        id: deploy
+        uses: actions/deploy-pages@v4

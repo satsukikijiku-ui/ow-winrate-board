@@ -168,6 +168,11 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
 .tier-actions button { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 4px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
 .tier-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
 .tier-note { font-size: 12px; color: var(--muted); }
+.tier-actions .btn-x { background: #0f1419; border-color: #0f1419; color: #fff; font-weight: 700; }
+.tier-actions .btn-discord { background: #5865f2; border-color: #5865f2; color: #fff; font-weight: 700; }
+.tier-actions button:disabled { opacity: 0.5; cursor: default; }
+.tier-msg-box { font-size: 12.5px; line-height: 1.7; background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 8px 12px; }
+.tier-msg-box:empty { display: none; }
 
 @media (max-width: 980px) {
   .board { grid-template-columns: minmax(0, 1fr); }
@@ -266,9 +271,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
       <div class="tier-preview" id="tier-preview"><span class="tier-note">作成中…</span></div>
       <div class="tier-actions">
         <button type="button" class="primary" id="tier-save">画像を保存</button>
-        <button type="button" id="tier-share" hidden>共有</button>
-        <span class="tier-note" id="tier-msg" role="status"></span>
+        <button type="button" class="btn-x" id="tier-x" disabled>Xに投稿</button>
+        <button type="button" class="btn-discord" id="tier-discord" disabled>Discordに送る</button>
       </div>
+      <div class="tier-msg-box" id="tier-msg" role="status"></div>
       <div class="tier-note">S 54%以上／A 52〜54%／B 50〜52%／C 48〜50%／D 48%未満（勝率）。ピック率1%未満のキャラは試合数が少ないため「参考」として別枠に表示します。</div>
     </div>
   </dialog>
@@ -672,6 +678,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
 
   // アクセスカウンター：同じブラウザは1日（日本時間）1回だけ数える。管理者（?admin で開いたとき・ログイン中）は数えない
   async function setupCounter() {
+    if (new URLSearchParams(location.search).has("render")) return;
     if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(COUNTER_URL)) return;
     const KEY = "ow-counted";
     const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" }).format(new Date());
@@ -734,46 +741,133 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
   }
 
   // チップ（キャラ名＋勝率）を幅に合わせて折り返し配置する。描画せずに高さだけ求めることもできる
+  const CHIP_L = { h: 44, gap: 8, padx: 14, name: 19, num: 16, stripe: 6, r: 6 };
+  const CHIP_S = { h: 34, gap: 8, padx: 10, name: 15, num: 13, stripe: 6, r: 6 };
   function layoutChips(ctx, items, x0, y0, maxW, small) {
-    const H = small ? 34 : 44, GAP = 8, PADX = small ? 10 : 14;
-    const nameFont = `700 ${small ? 15 : 19}px ${F_BODY}`, numFont = `500 ${small ? 13 : 16}px ${F_NUM}`;
+    const o = typeof small === "object" ? small : small ? CHIP_S : CHIP_L;
+    const H = o.h, GAP = o.gap, PADX = o.padx, STRIPE = o.stripe;
+    const nameFont = `700 ${o.name}px ${F_BODY}`, numFont = `500 ${o.num}px ${F_NUM}`;
     let x = x0, y = y0;
     const placed = items.map((it) => {
       ctx.font = nameFont; const nw = ctx.measureText(it.name).width;
       const num = it.win.toFixed(1) + "%";
       ctx.font = numFont; const ww = ctx.measureText(num).width;
-      const w = Math.ceil(6 + PADX + nw + 10 + ww + PADX);
+      const w = Math.ceil(STRIPE + PADX + nw + 10 + ww + PADX);
       if (x > x0 && x + w > x0 + maxW) { x = x0; y += H + GAP; }
       const p = { it, num, x, y, w, nw };
       x += w + GAP;
       return p;
     });
-    return { placed, height: items.length ? y - y0 + H : 0, H, PADX, nameFont, numFont };
+    return { placed, height: items.length ? y - y0 + H : 0, H, PADX, STRIPE, R: o.r, nameFont, numFont };
   }
 
   function drawChips(ctx, lay, small) {
     lay.placed.forEach((p) => {
-      roundRect(ctx, p.x, p.y, p.w, lay.H, 6); ctx.fillStyle = TC.panel; ctx.fill();
-      ctx.save(); roundRect(ctx, p.x, p.y, p.w, lay.H, 6); ctx.clip();
-      ctx.fillStyle = TC[p.it.role] || TC.muted; ctx.fillRect(p.x, p.y, 6, lay.H); ctx.restore();
+      roundRect(ctx, p.x, p.y, p.w, lay.H, lay.R); ctx.fillStyle = TC.panel; ctx.fill();
+      ctx.save(); roundRect(ctx, p.x, p.y, p.w, lay.H, lay.R); ctx.clip();
+      ctx.fillStyle = TC[p.it.role] || TC.muted; ctx.fillRect(p.x, p.y, lay.STRIPE, lay.H); ctx.restore();
       const cy = p.y + lay.H / 2 + 1;
       ctx.textBaseline = "middle";
-      ctx.font = lay.nameFont; ctx.fillStyle = small ? TC.muted : TC.ink; ctx.fillText(p.it.name, p.x + 6 + lay.PADX, cy);
-      ctx.font = lay.numFont; ctx.fillStyle = TC.muted; ctx.fillText(p.num, p.x + 6 + lay.PADX + p.nw + 10, cy);
+      ctx.font = lay.nameFont; ctx.fillStyle = small ? TC.muted : TC.ink; ctx.fillText(p.it.name, p.x + lay.STRIPE + lay.PADX, cy);
+      ctx.font = lay.numFont; ctx.fillStyle = TC.muted; ctx.fillText(p.num, p.x + lay.STRIPE + lay.PADX + p.nw + 10, cy);
     });
   }
 
-  async function drawTier(mapId) {
-    const { m, groups, low } = tierData(mapId);
-    const W = 1080, PAD = 40, LABEL_W = 120, SCALE = 2;
+  async function loadTierFonts(m, groups, low) {
     const allText = [m ? m.label + m.mode : "", ...groups.flat().map((x) => x.name), ...low.map((x) => x.name),
-      "OW勝率ボード ティア表 集計日 出典 オーバーウォッチ公式 ヒーロー統計 ライバル・プレイ マウス＆キーボード アジア 全ティア 非公式ファンツール Blizzard Entertainment とは関係ありません 参考 ピック率 未満 以上 〜 タンク ダメージ サポート 試合数が少ないため別枠 ― 0123456789.%（）／：・"].join("");
+      "OW勝率ボード ティア表 集計日 出典 オーバーウォッチ公式 ヒーロー統計 ライバル・プレイ マウス＆キーボード アジア 全ティア 非公式ファンツール Blizzard Entertainment とは関係ありません 参考 ピック率 未満 以上 除外 〜 タンク ダメージ サポート 試合数が少ないため別枠 最新パッチ以降の累計 勝率で分類 ― 0123456789.%（）／：・|"].join("");
     try {
       await Promise.all([
         document.fonts.load(`700 19px "Noto Sans JP"`, allText), document.fonts.load(`500 14px "Noto Sans JP"`, allText),
         document.fonts.load(`700 52px "Saira Condensed"`, allText), document.fonts.load(`500 16px "IBM Plex Mono"`, "0123456789.%"),
       ]);
     } catch (e) { /* フォントが読めなくても代わりのフォントで描く */ }
+  }
+
+  // リンクカード用の横長画像（1200×630。X・Discord でURLを貼ったときに表示される）
+  // ピック率1%未満のキャラは載せない。全員が収まるまでチップを小さくして詰める
+  async function drawTierCard(mapId) {
+    const { m, groups, low } = tierData(mapId);
+    await loadTierFonts(m, groups, low);
+    const W = 1200, H = 630, PAD = 32, LABEL_W = 74, TOP = 108, FOOT = 34, ROW_GAP = 6;
+    const chipsX = PAD + LABEL_W + 8, chipsW = W - PAD - chipsX - 20;
+    const avail = H - TOP - FOOT - ROW_GAP * (TIERS.length - 1);
+    const sizes = [
+      { h: 32, gap: 6, padx: 10, name: 16, num: 13, stripe: 4, r: 5 },
+      { h: 30, gap: 6, padx: 9, name: 15, num: 12, stripe: 4, r: 5 },
+      { h: 28, gap: 5, padx: 8, name: 14, num: 12, stripe: 4, r: 4 },
+      { h: 26, gap: 5, padx: 7, name: 13, num: 11, stripe: 4, r: 4 },
+      { h: 24, gap: 4, padx: 6, name: 12, num: 10, stripe: 3, r: 4 },
+      { h: 22, gap: 4, padx: 5, name: 11, num: 9, stripe: 3, r: 3 },
+    ];
+    const measure = document.createElement("canvas").getContext("2d");
+    let size = sizes[sizes.length - 1], lays = null, rowHs = null;
+    for (const sz of sizes) {
+      const ls = groups.map((g) => layoutChips(measure, g, 0, 0, chipsW, sz));
+      const hs = ls.map((l) => Math.max(sz.h + 16, l.height + 14));
+      if (hs.reduce((a, b) => a + b, 0) <= avail || sz === sizes[sizes.length - 1]) { size = sz; lays = ls; rowHs = hs; break; }
+    }
+    // 余った高さは各段に均等に配る
+    const extra = Math.max(0, avail - rowHs.reduce((a, b) => a + b, 0));
+    rowHs = rowHs.map((h) => h + extra / TIERS.length);
+
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = TC.bg; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = TC.accent; ctx.fillRect(0, 0, W, 6);
+    ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+    ctx.fillStyle = TC.accent; ctx.font = `700 15px ${F_BODY}`; ctx.fillText("OW勝率ボード　ティア表", PAD, 36);
+    ctx.fillStyle = TC.ink; ctx.font = `700 46px ${F_DISP}`;
+    const title = m ? m.label : "";
+    ctx.fillText(title, PAD, 86);
+    const tw = ctx.measureText(title).width;
+    ctx.fillStyle = TC.muted; ctx.font = `500 16px ${F_BODY}`; ctx.fillText(m ? m.mode : "", PAD + tw + 12, 84);
+    ctx.textAlign = "right";
+    const when = state.info && state.info.updatedAt ? fmtDate(state.info.updatedAt) : "";
+    ctx.font = `700 15px ${F_BODY}`; ctx.fillStyle = TC.ink; ctx.fillText(`集計日 ${when}`, W - PAD, 60);
+    ctx.font = `500 13px ${F_BODY}`; ctx.fillStyle = TC.muted; ctx.fillText("ライバル・プレイ／マウス＆キーボード／アジア／全ティア　勝率で分類", W - PAD, 84);
+    ctx.textAlign = "left";
+
+    let y = TOP;
+    TIERS.forEach((t, i) => {
+      const rh = rowHs[i];
+      roundRect(ctx, PAD, y, LABEL_W, rh, 5); ctx.fillStyle = t.color; ctx.fill();
+      ctx.fillStyle = TC.onTier; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const big = rh >= 64;
+      ctx.font = `700 ${big ? 36 : 28}px ${F_DISP}`; ctx.fillText(t.key, PAD + LABEL_W / 2, y + rh / 2 - (big ? 8 : 6));
+      ctx.font = `700 ${big ? 11 : 10}px ${F_BODY}`; ctx.fillText(t.label, PAD + LABEL_W / 2, y + rh / 2 + (big ? 20 : 14));
+      ctx.textAlign = "left";
+      roundRect(ctx, chipsX, y, W - PAD - chipsX, rh, 5); ctx.fillStyle = "rgba(255,255,255,0.03)"; ctx.fill();
+      ctx.strokeStyle = TC.line; ctx.lineWidth = 1; ctx.stroke();
+      if (groups[i].length) {
+        const lay = layoutChips(ctx, groups[i], chipsX + 10, y + (rh - lays[i].height) / 2, chipsW, size);
+        drawChips(ctx, lay, false);
+      } else {
+        ctx.fillStyle = TC.muted; ctx.font = `500 14px ${F_BODY}`; ctx.textBaseline = "middle"; ctx.fillText("―", chipsX + 14, y + rh / 2);
+      }
+      y += rh + ROW_GAP;
+    });
+
+    // 下の帯：凡例・出典・非公式表記
+    const fy = H - 15;
+    ctx.textBaseline = "middle"; ctx.font = `500 11.5px ${F_BODY}`;
+    let lx = PAD;
+    [["tank", "タンク"], ["damage", "ダメージ"], ["support", "サポート"]].forEach(([r, jp]) => {
+      ctx.fillStyle = TC[r]; ctx.fillRect(lx, fy - 5, 10, 10);
+      ctx.fillStyle = TC.muted; ctx.fillText(jp, lx + 14, fy); lx += 14 + ctx.measureText(jp).width + 12;
+    });
+    const lowNote = low.length ? `ピック率${TIER_MIN_PICK}%未満の${low.length}人は除外　` : "";
+    ctx.fillText(`${lowNote}出典：オーバーウォッチ公式 ヒーロー統計（最新パッチ以降の累計）`, lx + 4, fy);
+    ctx.textAlign = "right"; ctx.fillText("非公式ファンツール　Blizzard Entertainment とは関係ありません", W - PAD, fy);
+    ctx.textAlign = "left";
+    return cv;
+  }
+
+  async function drawTier(mapId) {
+    const { m, groups, low } = tierData(mapId);
+    const W = 1080, PAD = 40, LABEL_W = 120, SCALE = 2;
+    await loadTierFonts(m, groups, low);
 
     const measure = document.createElement("canvas").getContext("2d");
     const chipsW = W - PAD * 2 - LABEL_W - 16;
@@ -860,9 +954,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
     const dlg = $("tier-dialog"), box = $("tier-preview"), m = state.maps.find((x) => x.id === state.map);
     $("tier-title").textContent = "ティア表：" + (m ? m.label : "");
     box.replaceChildren(el("span", "tier-note", "作成中…"));
-    $("tier-msg").textContent = "";
-    $("tier-share").hidden = true;
+    tierMsg([]);
+    $("tier-x").disabled = true; $("tier-discord").disabled = true;
     tierBlob = null;
+    loadCardIndex();
     if (dlg.showModal) dlg.showModal(); else dlg.setAttribute("open", "");
     try {
       const cv = await drawTier(state.map);
@@ -871,10 +966,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
       img.alt = (m ? m.label : "") + " のティア表";
       img.src = URL.createObjectURL(tierBlob);
       box.replaceChildren(img);
-      try {
-        const file = new File([tierBlob], tierFileName, { type: "image/png" });
-        $("tier-share").hidden = !(navigator.canShare && navigator.canShare({ files: [file] }));
-      } catch (e) { $("tier-share").hidden = true; }
+      $("tier-x").disabled = false; $("tier-discord").disabled = false;
     } catch (e) {
       box.replaceChildren(el("span", "tier-note", "画像を作れませんでした。時間をおいて試してください。"));
     }
@@ -885,21 +977,104 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
   $("tier-dialog").addEventListener("click", (e) => { if (e.target === e.currentTarget && e.currentTarget.close) e.currentTarget.close(); });
   $("tier-save").addEventListener("click", () => {
     if (!tierBlob) return;
+    saveTier();
+    tierMsg(["保存しました（" + tierFileName + "）"]);
+  });
+  // ---- 共有（X・Discord） ----
+  // 毎週の更新で、マップごとの共有用ページ（share/〈マップ〉.html）とカード画像（tier/〈マップ〉.png）を作っている。
+  // 共有用ページのURLを投稿すると、X・Discord がカード画像を自動で表示する（画像の貼り付けは不要）。
+  // 共有用ページがまだ無い・データが古いときは、画像をコピーして貼り付けてもらう方式に切り替える
+  function boardUrl() { return location.origin + location.pathname.replace(/index\.html$/, ""); }
+  function stampOf(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    const p = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+    return p.replace(/\D/g, "").slice(0, 12);
+  }
+  let cardIndex = null;
+  async function loadCardIndex() {
+    if (cardIndex) return cardIndex;
+    try { cardIndex = await getJSON("tier/index.json"); } catch (e) { cardIndex = { maps: [] }; }
+    return cardIndex;
+  }
+  function cardReady(mapId) {
+    const ci = cardIndex;
+    return !!(ci && state.info && ci.updatedAt === state.info.updatedAt && Array.isArray(ci.maps) && ci.maps.includes(mapId));
+  }
+  function shareUrl(mapId) {
+    return cardReady(mapId) ? `${boardUrl()}share/${mapId}.html?v=${stampOf(state.info.updatedAt)}` : boardUrl();
+  }
+  function shareText(mapId) {
+    const m = state.maps.find((x) => x.id === mapId);
+    return `${m ? m.label : ""} ティア表（ライバル・プレイ／アジア） #OW勝率ボード\n${shareUrl(mapId)}`;
+  }
+  function tierMsg(lines) {
+    const box = $("tier-msg");
+    box.replaceChildren();
+    lines.forEach((t, i) => { if (i) box.appendChild(document.createElement("br")); box.append(t); });
+  }
+  // 画像をコピー。できなければ画像を保存して false を返す
+  function copyImage() {
+    try {
+      if (!navigator.clipboard || !window.ClipboardItem) throw new Error("no clipboard");
+      return navigator.clipboard.write([new ClipboardItem({ "image/png": tierBlob })]).then(() => true, () => { saveTier(); return false; });
+    } catch (e) {
+      saveTier();
+      return Promise.resolve(false);
+    }
+  }
+  function copyText(t) {
+    try { return navigator.clipboard.writeText(t).then(() => true, () => false); } catch (e) { return Promise.resolve(false); }
+  }
+  const isPhone = () => /iPhone|iPad|Android/i.test(navigator.userAgent);
+  const pasteHow = () => (isPhone() ? "入力欄を長押し →「ペースト」" : "Ctrl + V（Mac は ⌘ + V）");
+
+  function saveTier() {
+    if (!tierBlob) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(tierBlob); a.download = tierFileName;
     document.body.appendChild(a); a.click(); a.remove();
-    $("tier-msg").textContent = "保存しました（" + tierFileName + "）";
-  });
-  $("tier-share").addEventListener("click", async () => {
+  }
+
+  $("tier-x").addEventListener("click", () => {
     if (!tierBlob) return;
-    const m = state.maps.find((x) => x.id === state.map);
-    const file = new File([tierBlob], tierFileName, { type: "image/png" });
-    // ボードのURL（?admin などは付けない）。url 欄は画像と一緒だと無視されやすいので、文言の中に入れる
-    const boardUrl = location.origin + location.pathname.replace(/index\.html$/, "");
-    try {
-      await navigator.share({ files: [file], title: "OW勝率ボード ティア表", text: `${m ? m.label : ""} ティア表（ライバル・プレイ／アジア） #OW勝率ボード\n${boardUrl}` });
-    } catch (e) { /* 共有をやめたときは何もしない */ }
+    const mapId = state.map, card = cardReady(mapId);
+    // 投稿画面はクリックと同時に開く（後から開くとポップアップとしてブロックされるため）
+    const copying = card ? Promise.resolve(true) : copyImage();
+    window.open("https://x.com/intent/post?text=" + encodeURIComponent(shareText(mapId)), "_blank", "noopener");
+    if (card) {
+      tierMsg(["X の投稿画面を開きました。そのまま投稿すると、ティア表の画像がリンクカードとして表示されます。", "※ 投稿画面では画像が出るまで少し時間がかかることがあります。"]);
+      return;
+    }
+    copying.then((ok) => tierMsg(ok
+      ? ["X の投稿画面を開き、文言（マップ名・ハッシュタグ・URL）を入れました。", `画像はコピー済みなので、投稿画面で ${pasteHow()} で貼り付けてください。`]
+      : ["X の投稿画面を開き、文言を入れました。", `画像（${tierFileName}）を保存したので、投稿画面の画像ボタンから添付してください。`]));
   });
+
+  $("tier-discord").addEventListener("click", () => {
+    if (!tierBlob) return;
+    const mapId = state.map;
+    if (cardReady(mapId)) {
+      copyText(shareText(mapId)).then((ok) => tierMsg(ok
+        ? ["文言とURLをコピーしました。", `Discord の送りたいチャンネルやDMで ${pasteHow()} で貼り付けて送信すると、ティア表の画像が表示されます。`]
+        : ["コピーできませんでした。次の文を Discord に貼り付けてください：", shareText(mapId)]));
+      return;
+    }
+    copyImage().then((ok) => tierMsg(ok
+      ? ["画像をコピーしました。", `Discord の送りたいチャンネルやDMを開き、${pasteHow()} で貼り付けて送信してください。`, "URLも付けたい場合は、文章欄に貼り付けてください：" + boardUrl()]
+      : [`画像（${tierFileName}）を保存しました。`, "Discord の送りたいチャンネルやDMに、保存した画像をドラッグするか、＋ボタンから添付してください。"]));
+  });
+
+  // カード画像を作るプログラム（scripts/render-tiers.mjs）から使う入口
+  let markReady;
+  const readyP = new Promise((r) => { markReady = r; });
+  window.__owTier = {
+    ready: () => readyP,
+    maps: () => state.maps.map((m) => ({ id: m.id, label: m.label, mode: m.mode })),
+    info: () => state.info,
+    stamp: () => (state.info ? stampOf(state.info.updatedAt) : ""),
+    card: async (id) => (await drawTierCard(id)).toDataURL("image/png"),
+  };
 
   render();
   setupAdmin();
@@ -927,8 +1102,13 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline
       state.recs = {};
     }
     state.loaded = true;
+    try {
+      const qm = new URLSearchParams(location.search).get("map");
+      if (qm && state.maps.some((m) => m.id === qm)) state.map = qm;
+    } catch (e) {}
     buildChips();
     render();
+    markReady();
   })();
 })();
 </script>
